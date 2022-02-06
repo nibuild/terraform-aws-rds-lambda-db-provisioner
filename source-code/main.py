@@ -51,6 +51,12 @@ class DBProvisioner(object):
         )
         return response.get('DBInstances')[0]
 
+    def describe_cluster(self, identifier: str) -> dict:
+        response = self.rds_client.describe_db_clusters(
+            DBClusterIdentifier=identifier
+        )
+        return response.get('DBClusters')[0]
+
     def get_ssm_parameter_value(self, name: str) -> str:
         response = self.ssm_client.get_parameter(
             Name=name,
@@ -239,8 +245,14 @@ class DBProvisioner(object):
         connection.close()
 
     def provision(self):
-        instance = self.describe_instance(os.environ.get('DB_INSTANCE_ID'))
-
+        if os.environ.get('CLUSTER_IDENTIFIER') != "":
+            self.logger.info("Getting information for cluster '{}'".format(os.environ.get('CLUSTER_IDENTIFIER')))
+            instance = self.describe_cluster(os.environ.get('CLUSTER_IDENTIFIER'))
+        else:
+            self.logger.info("Getting information for instance '{}'".format(os.environ.get('DB_INSTANCE_ID')))
+            instance = self.describe_instance(os.environ.get('DB_INSTANCE_ID'))
+        
+        self.logger.info("Fetching additional needed information from SSM")
         master_password_ssm_param_name = os.environ.get('DB_MASTER_PASSWORD_SSM_PARAM')
         master_password = self.get_ssm_parameter_value(master_password_ssm_param_name) \
             if master_password_ssm_param_name else os.environ.get('DB_MASTER_PASSWORD')
@@ -249,21 +261,33 @@ class DBProvisioner(object):
         user_password = self.get_ssm_parameter_value(user_password_ssm_param_name) \
             if user_password_ssm_param_name else os.environ.get('PROVISION_USER_PASSWORD')
 
-        db_info: DBInfo = DBInfo(
-            host=instance.get('Endpoint').get('Address'),
-            port=instance.get('Endpoint').get('Port'),
-            master_username=instance.get('MasterUsername'),
-            master_password=master_password,
-            connect_db_name=os.environ.get('CONNECT_DB_NAME', instance.get('DBName')),
-            provision_db_name=os.environ.get('PROVISION_DB_NAME'),
-            provision_user=os.environ.get('PROVISION_USER'),
-            provision_user_password=user_password
-        )
+        if os.environ.get('CLUSTER_IDENTIFIER') != "":
+            db_info: DBInfo = DBInfo(
+                host=instance.get('Endpoint'),
+                port=instance.get('Port'),
+                master_username=instance.get('MasterUsername'),
+                master_password=master_password,
+                connect_db_name=os.environ.get('CONNECT_DB_NAME', instance.get('DatabaseName')),
+                provision_db_name=os.environ.get('PROVISION_DB_NAME'),
+                provision_user=os.environ.get('PROVISION_USER'),
+                provision_user_password=user_password
+            )
+        else:
+            db_info: DBInfo = DBInfo(
+                host=instance.get('Endpoint').get('Address'),
+                port=instance.get('Endpoint').get('Port'),
+                master_username=instance.get('MasterUsername'),
+                master_password=master_password,
+                connect_db_name=os.environ.get('CONNECT_DB_NAME', instance.get('DBName')),
+                provision_db_name=os.environ.get('PROVISION_DB_NAME'),
+                provision_user=os.environ.get('PROVISION_USER'),
+                provision_user_password=user_password
+            )
 
         engine: str = instance.get('Engine')
-        if engine == 'postgres':
+        if engine == 'postgres' or engine == 'aurora-postgres':
             self.provision_postgres_db(db_info)
-        elif engine == 'mysql':
+        elif engine == 'mysql' or engine == 'aurora-mysql':
             self.provision_mysql_db(db_info)
         else:
             raise NotImplementedError('{} engine is not supported'.format(engine))

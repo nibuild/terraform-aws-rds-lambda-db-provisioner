@@ -85,9 +85,16 @@ variable "logs_kms_key_id" {
   default     = null
 }
 
+variable "cluster_identifier" {
+  type        = string
+  description = "Cluster Instance Identifer - Overrides db_instnace_id"
+  default     = null
+}
+
 variable "db_instance_id" {
   type        = string
   description = "DB Instance Identifier"
+  default     = null
 }
 
 variable "db_master_password_ssm_param" {

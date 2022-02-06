@@ -18,18 +18,28 @@ locals {
   # Replace null with empty string so that the following regexall will work.
   db_user_password_ssm_param      = var.db_user_password_ssm_param == null ? "" : var.db_user_password_ssm_param
   user_password_in_secretsmanager = length(regexall("/aws/reference/secretsmanager/", local.db_user_password_ssm_param)) > 0
+
+  # Get the port information for either the cluster or instance
+  db_port = (var.cluster_identifier == null) ? join("", data.aws_db_instance.default.*.port) : join("", data.aws_rds_cluster.default.*.port)
 }
 
 #############################################################
 # Datasources
 #############################################################
 
-data "aws_partition" "default" {}
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
 
 data "aws_db_instance" "default" {
-  count = var.enabled ? 1 : 0
+  count = (var.enabled && var.cluster_identifier == null) ? 1 : 0
 
   db_instance_identifier = var.db_instance_id
+}
+
+data "aws_rds_cluster" "default" {
+  count = (var.enabled && var.cluster_identifier != null) ? 1 : 0
+
+  cluster_identifier = var.cluster_identifier
 }
 
 data "aws_ssm_parameter" "master_password" {
@@ -106,7 +116,7 @@ resource "aws_lambda_function" "default" {
   ]
 
   function_name = module.default_label.id
-  description   = "Provisions database [${var.db_name}] in RDS Instance [${var.db_instance_id}]"
+  description   = (var.cluster_identifier == null ) ? "Provisions database [${var.db_name}] in RDS Instance [${var.db_instance_id}]" : "Provisions database [${var.db_name}] in RDS Cluster [${var.cluster_identifier}]"
 
   filename         = local.lambda_zip_archive_path
   source_code_hash = filebase64sha256(local.lambda_zip_archive_path)
@@ -126,6 +136,7 @@ resource "aws_lambda_function" "default" {
   environment {
     variables = {
       DB_INSTANCE_ID                    = var.db_instance_id
+      CLUSTER_IDENTIFIER                = var.cluster_identifier
       DB_MASTER_PASSWORD                = var.db_master_password
       DB_MASTER_PASSWORD_SSM_PARAM      = var.db_master_password_ssm_param
       PROVISION_DB_NAME                 = var.db_name
@@ -183,8 +194,8 @@ resource "aws_security_group_rule" "egress_from_lambda_to_db_instance" {
 
   description              = "Allow outbound traffic from Lambda to DB Instance"
   type                     = "egress"
-  from_port                = join("", data.aws_db_instance.default.*.port)
-  to_port                  = join("", data.aws_db_instance.default.*.port)
+  from_port                = local.db_port
+  to_port                  = local.db_port
   protocol                 = "tcp"
   source_security_group_id = var.db_instance_security_group_id
   security_group_id        = join("", aws_security_group.default.*.id)
@@ -195,8 +206,8 @@ resource "aws_security_group_rule" "ingress_to_db_instance_from_lambda" {
 
   description              = "Allow inbound traffic to DB Instance from Lambda"
   type                     = "ingress"
-  from_port                = join("", data.aws_db_instance.default.*.port)
-  to_port                  = join("", data.aws_db_instance.default.*.port)
+  from_port                = local.db_port
+  to_port                  = local.db_port
   protocol                 = "tcp"
   source_security_group_id = join("", aws_security_group.default.*.id)
   security_group_id        = var.db_instance_security_group_id
@@ -240,6 +251,7 @@ data "aws_iam_policy_document" "default_permissions" {
     effect = "Allow"
     actions = [
       "rds:DescribeDBInstances",
+      "rds:DescribeDBClusters"
     ]
     resources = ["*"]
   }
@@ -265,7 +277,7 @@ data "aws_iam_policy_document" "master_password_ssm_permissions" {
     actions = [
       "ssm:GetParameter",
     ]
-    resources = [join("", data.aws_ssm_parameter.master_password.*.arn)]
+    resources = ["arn:aws:ssm:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:parameter${var.db_master_password_ssm_param}"]
   }
 }
 
@@ -301,7 +313,7 @@ data "aws_iam_policy_document" "user_password_ssm_permissions" {
     actions = [
       "ssm:GetParameter",
     ]
-    resources = [join("", data.aws_ssm_parameter.user_password.*.arn)]
+    resources = ["arn:aws:ssm:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:parameter${var.db_user_password_ssm_param}"]
   }
 }
 
@@ -375,14 +387,14 @@ resource "aws_iam_role_policy_attachment" "basic_execution" {
   count = var.enabled ? 1 : 0
 
   role       = join("", aws_iam_role.lambda.*.name)
-  policy_arn = "arn:${data.aws_partition.default.partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
 resource "aws_iam_role_policy_attachment" "vpc_access" {
   count = var.enabled ? 1 : 0
 
   role       = join("", aws_iam_role.lambda.*.name)
-  policy_arn = "arn:${data.aws_partition.default.partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
 #############################################################
